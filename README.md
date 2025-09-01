@@ -27,8 +27,8 @@ Este documento contém uma série de padrões de projetos que devem ser seguidos
 | Mensagem de **leitura**         | **`ReadQuery`** (`<Name>ReadQuery`)                          | Obter dados sem efeitos colaterais.                 |
 | Função de Captura (**handler**) | **`<Name>ApplicationHandler`** (genérico); Um handler compatível com a mensagem enviada é acionado. | Orquestrar o caso de uso.                           |
 | Mediador da Aplicação           | **`ApplicationMediator`**                                    | Aplica pipeline e roteia mensagem para os handlers. |
-| REPOSITÓRIO (escrita)           | **`<Name>WriteRepository`**                                  | Hidrata/salva AGREGADO.                             |
-| REPOSITÓRIO (leitura)           | **`<Name>ReadRepository`**                                   | Retorna **DTOs** (sem hidratar).                    |
+| REPOSITÓRIO (escrita)           | **`<Name>WritableRepository`**                               | Hidrata/salva AGREGADO.                             |
+| REPOSITÓRIO (leitura)           | **`<Name>ReadableRepository`**                               | Retorna **DTOs** (sem hidratar).                    |
 | ENTIDADE                        | **`<Name>Entity`** ou `<Name>AggregateRoot`                  | Possui identidade, invariantes.                     |
 | VO                              | **`<Name>ValueObject`**                                      | Sem identidade, imutável.                           |
 | SERVIÇO DE DOMÍNIO              | **`<Name>DomainService`**                                    | Regra/política que não “cabe” em uma entidade.      |
@@ -225,7 +225,7 @@ OBJETOS DE VALOR são objetos de domínio que **não** possuem uma identidade. E
 
 #### Boas Práticas
 
-- Ao invés de utilizar o construtor padrão, utilizar um método estático dentro do próprio OBJETO DE VALOR (`ValueObject.create`) para atuar como `Factory` ou criar uma classe específica de montagem do OBJETO DE VALOR. Neste método (ou classe), você deve retornar um objeto `Result` ao invés de lançar uma exceção caso algum parâmetro não seja compatível;
+- Ao invés de utilizar o construtor padrão, utilizar um método estático dentro do próprio OBJETO DE VALOR (`ValueObject.normalize`) para atuar como `Factory` ou criar uma classe específica de montagem do OBJETO DE VALOR. Neste método (ou classe), você deve retornar um objeto `Result` ao invés de lançar uma exceção caso algum parâmetro não seja compatível;
 - OBJETOS DE VALOR podem possuir métodos de mutabilidade, porém esses métodos devem retornar um novo OBJETO DE VALOR para ser reatribuído. Por exemplo, `Money.add(money)` irá retornar um novo OBJETO DE VALOR com o valor monetário atualizado. Preferencialmente, ao aplicar a mutação, retornar um objeto `Result` com o erro relacionado. Isso garante que exceções sejam lançadas apenas por comportamentos inesperados e não regras do domínio;
 - OBJETOS DE VALOR devem ser preferencialmente transmitidos como parâmetros em mensagens entre objetos (exemplo, Serviço x ENTIDADE). Também deve ser usados como atributos de ENTIDADES (preferencialmente para valores com comportamentos complexos e reutilizáveis);
 - OBJETOS DE VALOR devem ser conceitualmente completos;
@@ -247,6 +247,73 @@ Se um OBJETO DE VALOR mudar frequentemente, a criação ou exclusão for cara, a
 
 - `equals(vo)`: retorna se os OBJETOS DE VALOR são idênticos;
 - `hash()`: retorna o hash `sha256` do OBJETO DE VALOR;
+
+##### Regras de Implementação
+
+###### Princípios
+
+- **Imutável**: qualquer operação retorna **novo VO** (ou `this` quando não há mudança);
+- **Puro**: sem I/O, sem dependências externas que variem por ambiente (exceto libs determinísticas);
+- **Canônico**: normalize tudo na entrada para uma **representação única** (provavelmente o ideal é aplicar um esquema de validação para validar strings, sanitizar, etc).
+
+###### API pública
+
+- `static normalize(input | VO): Result<VO, DomainError>` — único “construtor público” validado;
+- `toSnapshot(): Snapshot` — serializável (somente **primitivos/POJOs**);
+- `static snapshotUnsafe(snapshot: Snapshot): VO` — reconstrução **sem validação** (use só com fonte confiável);
+- `toString(): string` — transforma informação relevante do VO para uma string.
+
+###### Normalização (canônica)
+
+- Aceite **primitivo e VO** no `normalize`; se já for VO, `Result.ok(vo)`;
+- Valide **esquema** com Zod → `InvalidSchemaNormalizationError`;
+- Valide **regra de domínio** (ex.: portas padrão, protocolos, arredondamento) → `InvalidNormalizationError` (com `field` + `message` claros);
+- **Canonize** dados dentro do `normalize`;
+- **Nunca lance** exceções em `normalize`; sempre retorne `Result`.
+
+###### Snapshot
+
+- `Snapshot` deve conter **apenas tipos serializáveis** e primitivos;
+- `snapshotUnsafe` deve **só reconstruir**; pode lançar erro síncrono se o snapshot for obviamente inválido (ex.: `amount` não é inteiro seguro).
+
+###### Igualdade e deduplicação
+
+- Use o `equals` profundo do `ValueObject` base para comparações de objetos;
+- Para **deduplicar** em `Set/Map`, **não** confie em referência nem em `toString()`. Use **chave canônica** ou se a documentação do método `toString()` permitir o uso;
+- Quando converter coleções para `Array`, **ordene por chave canônica** para ter **determinismo** (útil em snapshots/testes), se necessário.
+
+###### Operações de domínio
+
+- Métodos que manipulam o VO devem:
+  - Validar invariantes e lançar uma exceção;
+  - **Retornar novo VO** (ou `this` se “no-op”).
+- Métodos auxiliares podem lançar `Error` quando são **misuse** de API ou do desenvolvedor.
+
+###### Erros e mensagens
+
+- Use sempre `Result<T, DomainError>` no caminho feliz/feliz-com-falha;
+- Mantenha mensagens curtas e **específicas**; inclua `field` quando aplicável;
+- Evite vazar detalhes internos (hashing, libs, etc.) nas mensagens.
+
+###### Convenções de nome
+
+- `normalize`, `toSnapshot`, `snapshotUnsafe`, `toString` — **mesmos nomes** em todos os VOs;
+- Propriedades canônicas com nomes claros que expressem a seu devido valor;
+- Snapshots terminam com `Snapshot` (`TypeSnapshot`);
+- Para métodos de fábrica utilitários, padronize nomes relacionados ao objetivo da fábrica.
+
+###### Determinismo e estabilidade
+
+- Sempre **ordene** listas exportadas (por chave canônica);
+- Evite dependências de locale/ambiente em normalização (exceto quando explicitamente configurado, como timezone);
+- Mantenha invariantes de forma consistente entre VOs que se compõem (ex.: `Customer` → `AddressVO.normalize`, `DocumentVO.normalize`, etc.).
+
+##### Testes recomendados
+
+- **Golden tests** de normalização (mesmas entradas → mesma forma canônica);
+- **Property tests** simples para inputs diversos (URLs com/sem porta, IPs v4/v6, telefone vazio → `null`);
+- Testes de **determinismo** (ordem e dedupe);
+- Testes de **erros** (schema vs domínio).
 
 ##### Coleções
 
